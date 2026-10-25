@@ -46,7 +46,7 @@ def _bool_env(name: str, default: bool) -> bool:
 @dataclass(frozen=True)
 class Config:
     project_root: Path = PROJECT_ROOT
-    gmail_label: str = "newsletters"
+    gmail_label: str = "Newsletter"
     credentials_file: Path = PROJECT_ROOT / "credentials.json"
     token_file: Path = PROJECT_ROOT / "token.json"
     state_db: Path = PROJECT_ROOT / "state.db"
