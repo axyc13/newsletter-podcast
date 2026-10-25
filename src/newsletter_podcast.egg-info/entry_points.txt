@@ -1,0 +1,2 @@
+[console_scripts]
+newsletter-podcast = newsletter_podcast.main:cli

@@ -1,0 +1,10 @@
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.2.0
+beautifulsoup4>=4.12.0
+trafilatura>=1.12.0
+notebooklm-py>=0.8.5
+python-dotenv>=1.0.0
+
+[dev]
+pytest>=8.0
+ruff>=0.6

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.andrew.newsletterpodcast</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andrew/Desktop/podcast/.venv/bin/newsletter-podcast</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/andrew/Desktop/podcast</string>
+
+    <!-- Sunday 18:00 local (the main run) + Monday 09:00 (retry if Sunday failed).
+         launchd runs missed jobs on wake, so a sleeping Mac doesn't skip the week. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key><integer>0</integer>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>9</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/andrew/Desktop/podcast/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andrew/Desktop/podcast/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andrew/Desktop/podcast/logs/launchd.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

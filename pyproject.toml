@@ -1,0 +1,39 @@
+[project]
+name = "newsletter-podcast"
+version = "0.1.0"
+description = "Weekly pipeline: Gmail newsletters -> cleaned doc -> NotebookLM podcast -> email"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.2.0",
+    "beautifulsoup4>=4.12.0",
+    "trafilatura>=1.12.0",
+    "notebooklm-py>=0.8.5",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+newsletter-podcast = "newsletter_podcast.main:cli"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Broad/quiet excepts are deliberate: a weekly pipeline must never crash the
+# run on a malformed email or a mutated bs4 tree — it fails soft and emails us.
+ignore = ["BLE001", "S110", "S112", "SIM102", "PYI034"]

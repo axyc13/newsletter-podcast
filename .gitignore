@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Secrets — never commit
+token.json
+credentials.json
+
+# Runtime artifacts
+output/
+logs/
+state.db
+*.mp3
+*.m4a
+
+.pytest_cache/
+.ruff_cache/

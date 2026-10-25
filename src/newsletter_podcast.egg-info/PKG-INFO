@@ -1,0 +1,177 @@
+Metadata-Version: 2.4
+Name: newsletter-podcast
+Version: 0.1.0
+Summary: Weekly pipeline: Gmail newsletters -> cleaned doc -> NotebookLM podcast -> email
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: google-api-python-client>=2.100.0
+Requires-Dist: google-auth-oauthlib>=1.2.0
+Requires-Dist: beautifulsoup4>=4.12.0
+Requires-Dist: trafilatura>=1.12.0
+Requires-Dist: notebooklm-py>=0.8.5
+Requires-Dist: python-dotenv>=1.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
+# Weekly Newsletter Podcast
+
+Every Sunday: pull the week's newsletters from Gmail → clean and merge them into
+one document → generate a conversational podcast with NotebookLM → email you the MP3.
+
+```
+Gmail label "newsletters"
+   │  fetch (gmail.readonly)
+   ▼
+clean + merge (trafilatura + bs4 rules — no LLM, no token cost)
+   │  output/newsletter-YYYY-MM-DD.md
+   ▼
+NotebookLM audio generation (unofficial notebooklm-py)
+   │  output/episode-YYYY-MM-DD.mp3
+   ▼
+Gmail send → your inbox (attached; Drive link if > 20 MB)
+```
+
+State (processed message IDs + episode lifecycle) lives in `state.db` (SQLite).
+Every failure path emails you — silent failure is how projects like this die.
+
+## Project layout
+
+```
+src/newsletter_podcast/
+  config.py       env-driven settings, OAuth scopes
+  gmail_fetch.py  OAuth flow, label lookup, message fetching/parsing
+  clean.py        HTML → noise-stripped text; weekly merge
+  state.py        SQLite: processed IDs + episode status (pending→fetched→generated→sent)
+  storage.py      Drive upload/prune for oversized episodes
+  notify.py       episode email + failure alerts
+  audio/          AudioGenerator protocol (notebooklm backend + dummy for tests)
+  main.py         CLI: auth, notebooklm-login, fetch, generate, send, run, status
+tests/            22 unit tests (fixtures, cleaning rules, state machine, week keys)
+com.andrew.newsletterpodcast.plist   launchd job (Sun 18:00 + Mon 09:00 retry)
+```
+
+## One-time setup
+
+### 1. Python environment
+
+Already created. To recreate on a new machine:
+
+```bash
+/opt/homebrew/bin/python3.13 -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+```
+
+### 2. Google Cloud (Gmail + Drive APIs)
+
+1. [console.cloud.google.com](https://console.cloud.google.com) → create project `newsletter-podcast`.
+2. **APIs & Services → Library** → enable **Gmail API** and **Google Drive API**.
+3. **APIs & Services → OAuth consent screen** → External → fill in a name, your
+   support email, and add your Google account under **Test users**.
+4. **APIs & Services → Credentials → Create credentials → OAuth client ID →
+   Desktop app** → download the JSON and save it as `credentials.json` in this
+   directory (it is git-ignored).
+
+The flow requests three scopes: `gmail.readonly` (fetch), `gmail.send`
+(episodes + failure alerts), and `drive.file` (only files this app creates —
+used solely for episodes over the 20 MB attachment threshold).
+
+### 3. Authenticate
+
+```bash
+.venv/bin/newsletter-podcast auth             # browser opens; approve once
+.venv/bin/newsletter-podcast notebooklm-login # browser cookie login to NotebookLM
+```
+
+### 4. Gmail label
+
+Create a Gmail label named `newsletters` (or set `GMAIL_LABEL` to your own) and
+file your newsletters under it. The pipeline reads only that label.
+
+### 5. Dry-run before trusting it
+
+```bash
+.venv/bin/newsletter-podcast fetch --dry-run
+```
+
+Prints the cleaned, merged document without saving or marking anything
+processed. Inspect it: footers/unsubscribes should be gone, stories intact.
+
+## Running
+
+```bash
+.venv/bin/newsletter-podcast run      # fetch → generate → send (resumable)
+.venv/bin/newsletter-podcast status   # episode states + processed count
+.venv/bin/newsletter-podcast fetch    # step-by-step instead of `run`
+.venv/bin/newsletter-podcast generate
+.venv/bin/newsletter-podcast send
+```
+
+`run` resumes wherever the week stopped: if generation failed yesterday, today
+it skips fetch (doc already saved) and retries generation only.
+
+## Scheduling (launchd)
+
+`logs/` must exist first; then install the job (it runs at **18:00 Sunday and
+retries 09:00 Monday, local time** — if the Mac is asleep, launchd runs the
+missed job on wake):
+
+```bash
+mkdir -p logs
+cp com.andrew.newsletterpodcast.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
+# unload: launchctl unload ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
+```
+
+Keep **System Settings → General → Date & Time → Time zone** set to your New
+Zealand timezone — launchd's `StartCalendarInterval` uses local time.
+
+## Re-auth playbook (expect this every few weeks)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Failure email at `generate` mentioning login/storage/cookies | NotebookLM cookies expired | `.venv/bin/notebooklm login` then `.venv/bin/newsletter-podcast run` |
+| `Not authenticated yet` or `token is no longer usable` | Google refresh token revoked/aged | `rm token.json && .venv/bin/newsletter-podcast auth` |
+| `Gmail label 'newsletters' not found` | Label renamed | create/rename label or set `GMAIL_LABEL` |
+
+You also get a failure email automatically on any error (it includes the step
+name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
+(stdout/stderr of scheduled runs).
+
+## Configuration (environment variables / `.env`)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `GMAIL_LABEL` | `newsletters` | label to read |
+| `FETCH_DAYS` | `7` | look-back window for messages |
+| `NOTIFY_EMAIL` | authenticated account | episode/failure recipient |
+| `AUDIO_BACKEND` | `notebooklm` | `dummy` = write placeholder file, no network |
+| `AUDIO_MAX_MINUTES` | `15` | length hint in NotebookLM instructions |
+| `RETENTION_EPISODES` | `10` | Drive files kept after pruning |
+
+## Design notes
+
+- **One merged document per week**, not 30 separate sources — respects
+  NotebookLM's per-notebook size limits and keeps one coherent episode.
+- **Cleaning is deterministic** (regex/bs4 rules, zero token cost). `trafilatura`
+  does HTML→text; headings are demoted first because it otherwise discards the
+  `<h1>` as page metadata.
+- **The audio backend is a swappable `AudioGenerator`.** If notebooklm-py breaks
+  (it is unofficial), implement `generate(doc_path, week_of) -> Path` and set
+  `AUDIO_BACKEND`; the rest of the pipeline is untouched. Fallback options from
+  the design doc: Open Notebook, or DIY LLM + TTS.
+- **Episodes ≤ 20 MB attach directly**; bigger ones upload to Drive (owner-only
+  link) and older ones are pruned beyond `RETENTION_EPISODES`.
+- **Idempotency**: processed message IDs are recorded the moment the document is
+  saved; a week's episode is keyed by its Sunday, so Sunday's run and Monday's
+  retry share one episode row.
+
+## Development
+
+```bash
+.venv/bin/python -m pytest -q   # 22 tests
+.venv/bin/ruff check src tests  # lint
+```
+
+Add cleaning rules in `clean.py` (`_FOOTER_TEXT_PATTERNS`, `_NOISE_TOKENS`,
+anchor rules) with a fixture + test in `tests/`.
