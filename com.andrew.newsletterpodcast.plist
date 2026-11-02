@@ -5,17 +5,24 @@
     <key>Label</key>
     <string>com.andrew.newsletterpodcast</string>
 
+    <!-- Runs the shell wrapper, not the console script directly: the wrapper
+         also reports failures that happen before Python can start (missing
+         venv, permissions), which used to fail completely silently. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/andrew/Desktop/podcast/.venv/bin/newsletter-podcast</string>
-        <string>run</string>
+        <string>/bin/sh</string>
+        <string>/Users/andrew/podcast/scripts/run-weekly.sh</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/andrew/Desktop/podcast</string>
+    <string>/Users/andrew/podcast</string>
 
-    <!-- Sunday 18:00 local (the main run) + Monday 09:00 (retry if Sunday failed).
-         launchd runs missed jobs on wake, so a sleeping Mac doesn't skip the week. -->
+    <!-- Sunday 18:00 is the main run; Monday 09:00 and Monday 20:00 are
+         catch-up attempts. Every run is idempotent: if this week's episode is
+         already sent the pipeline exits immediately, so extra attempts cost
+         nothing. Keep this tree out of ~/Desktop, ~/Documents or ~/Downloads -
+         those folders are privacy-protected and launchd-spawned processes are
+         denied access to them without warning. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict>
@@ -28,18 +35,28 @@
             <key>Hour</key><integer>9</integer>
             <key>Minute</key><integer>0</integer>
         </dict>
+        <dict>
+            <key>Weekday</key><integer>1</integer>
+            <key>Hour</key><integer>20</integer>
+            <key>Minute</key><integer>0</integer>
+        </dict>
     </array>
+
+    <!-- A calendar trigger missed while the Mac is off is not replayed on the
+         next boot, so also try once per login/session. -->
+    <key>RunAtLoad</key>
+    <true/>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/andrew/Desktop/podcast/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+        <string>/Users/andrew/podcast/.venv/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/andrew/Desktop/podcast/logs/launchd.out.log</string>
+    <string>/Users/andrew/podcast/logs/launchd.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/andrew/Desktop/podcast/logs/launchd.err.log</string>
+    <string>/Users/andrew/podcast/logs/launchd.err.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

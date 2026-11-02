@@ -21,3 +21,4 @@ tests/test_clean.py
 tests/test_delivery.py
 tests/test_main.py
 tests/test_state.py
+tests/test_trash.py

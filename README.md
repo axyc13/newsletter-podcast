@@ -60,8 +60,10 @@ src/newsletter_podcast/
   notify.py       episode email + failure alerts
   audio/          AudioGenerator protocol (notebooklm backend + dummy for tests)
   main.py         CLI: auth, notebooklm-login, fetch, generate, send, run, status
-tests/            30 unit tests (cleaning rules, state machine, trash, week keys)
-com.andrew.newsletterpodcast.plist   launchd job (Sun 18:00 + Mon 09:00 retry)
+tests/            32 unit tests (cleaning rules, state machine, trash, week keys, auth)
+scripts/          run-weekly.sh — launchd entry point (surfaces pre-Python failures)
+                  reauth.sh     — weekly Google re-auth + pipeline resume
+com.andrew.newsletterpodcast.plist   launchd job (Sun 18:00 + Mon catch-ups)
 ```
 
 Full design rationale — including why NotebookLM over the alternatives — is in
@@ -133,37 +135,99 @@ messages are retried at the send step.
 
 ## Weekly automation (macOS launchd)
 
-The bundled job runs at **18:00 Sunday and retries 09:00 Monday, local
-time**; launchd runs a missed window on wake, so a sleeping Mac doesn't skip
-the week. It is spawn-and-die — no resident process. Install it with:
+The bundled job runs at **18:00 Sunday**, then makes catch-up attempts at
+**09:00 and 20:00 Monday** plus **once per login** (`RunAtLoad`). It is
+spawn-and-die — no resident process. Install it with:
 
 ```bash
 mkdir -p logs
 cp com.andrew.newsletterpodcast.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
-# unload: launchctl unload ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
+# unload: launchctl bootout gui/$(id -u)/com.andrew.newsletterpodcast
 ```
+
+The job runs `scripts/run-weekly.sh`, not the console script directly. The
+pipeline's own failure email can only fire once Python has started, so the
+wrapper reports the failures that happen *before* that: a missing venv, a broken
+shebang, a permission error. Without it those die silently — no `run.log` entry
+and no email.
+
+> **Keep the checkout out of `~/Desktop`, `~/Documents` and `~/Downloads`.**
+> macOS privacy protection (TCC) covers those folders, and a launchd-spawned
+> process gets `EPERM` on everything inside them without any prompt, because
+> there is nobody to prompt. The interpreter then dies while reading
+> `.venv/pyvenv.cfg`:
+>
+> ```
+> Fatal Python error: init_import_site: Failed to import the site module
+> PermissionError: [Errno 1] Operation not permitted: .venv/pyvenv.cfg
+> ```
+>
+> Your interactive shell keeps working (Terminal/VS Code hold the grant), which
+> makes this look like "the schedule stopped". If you must keep it in a protected
+> folder, grant **Full Disk Access** to the Python interpreter the venv points at
+> (System Settings → Privacy & Security → Full Disk Access); re-grant it after
+> every Homebrew Python upgrade.
+
+A `StartCalendarInterval` missed because the Mac was **off** is not replayed on
+the next boot — launchd just reschedules the next occurrence — so the extra
+triggers and `RunAtLoad` exist to catch up. All of them are safe to run
+repeatedly: a run for a week that is already `sent` exits immediately.
+
+The one thing the schedule cannot fix by itself is the Google credential: while
+the OAuth consent screen stays in *Testing*, the refresh token dies after 7 days,
+so re-arm it weekly with `scripts/reauth.sh` (see Troubleshooting).
 
 Adjust the `Label`, paths and times inside the plist if you fork it, and keep
 your system timezone set to what you want "Sunday 18:00" to mean. On Linux,
 an equivalent crontab entry works the same way:
 
 ```cron
-0 18 * * 0  cd /path/to/podcast && .venv/bin/newsletter-podcast run >> logs/cron.log 2>&1
-0 9  * * 1  cd /path/to/podcast && .venv/bin/newsletter-podcast run >> logs/cron.log 2>&1
+0 18 * * 0  cd /path/to/podcast && scripts/run-weekly.sh >> logs/cron.log 2>&1
+0 9  * * 1  cd /path/to/podcast && scripts/run-weekly.sh >> logs/cron.log 2>&1
+0 20 * * 1  cd /path/to/podcast && scripts/run-weekly.sh >> logs/cron.log 2>&1
 ```
 
-## Troubleshooting (expect re-auth every few weeks)
+## Troubleshooting (expect a weekly re-auth while in Testing mode)
 
 | Symptom                                                      | Cause                             | Fix                                                                  |
 | ------------------------------------------------------------ | --------------------------------- | -------------------------------------------------------------------- |
 | Failure email at `generate` mentioning login/storage/cookies | NotebookLM cookies expired        | `.venv/bin/notebooklm login` then `.venv/bin/newsletter-podcast run` |
 | `Not authenticated yet` or `token is no longer usable`       | Google refresh token revoked/aged | `rm token.json && .venv/bin/newsletter-podcast auth`                 |
+| `invalid_grant: Token has been expired or revoked` at `fetch` | OAuth app still in **Testing** — Google kills those refresh tokens after 7 days (see below) | `scripts/reauth.sh` |
 | `Gmail label 'Newsletter' not found`                          | Label renamed                     | create/rename label or set `GMAIL_LABEL`                             |
 
+**Weekly re-auth (consent screen in Testing).** While the OAuth consent screen's
+publishing status is *Testing*, Google expires the refresh token after **7 days**,
+so the pipeline needs re-consenting roughly weekly. One command does both halves:
+
+```bash
+scripts/reauth.sh      # re-auth (browser consent), then resume the pipeline
+```
+
+It is safe at any time: `run` is idempotent, so a week that is already sent is a
+no-op, and re-authing mid-week never produces a second episode for the same week.
+In practice, re-auth on a **Saturday or Monday–Wednesday**: the resume step is
+then a no-op and the next Sunday 18:00 is still inside the 7-day window. (A
+Sunday-*morning* re-auth would build that week's episode from whatever has
+arrived so far, so avoid that unless you want it early.)
+The failure cannot be *emailed* when the Gmail credential is what broke, so
+`scripts/run-weekly.sh` treats a `token.json` older than 6 days as the likely
+cause and raises a desktop notification: "Google token likely expired - run
+scripts/reauth.sh".
+
+If the weekly ritual gets old, publish the app instead: Google Cloud console →
+APIs & Services → OAuth consent screen → **Publish app**. Leaving it unverified is
+fine — you click through "Google hasn't verified this app → Advanced → Go to …"
+once per re-auth — and refresh tokens then stop expiring after 7 days. The
+app-domain fields it asks for (home page, privacy policy, authorised domains) can
+be left blank for a single-user app; they only matter for verification.
+
 You also get a failure email automatically on any error (it includes the step
-name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
-(stdout/stderr of scheduled runs).
+name and this fix). Failures that happen *before* Python starts (missing venv,
+permission errors) can't email — `scripts/run-weekly.sh` logs those to
+`logs/launchd.err.log` and raises a notification instead. Logs: `logs/run.log`
+(every run), `logs/launchd.*.log` (stdout/stderr of scheduled runs).
 
 ## Configuration (environment variables / `.env`)
 
@@ -197,7 +261,7 @@ name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q   # 30 tests
+.venv/bin/python -m pytest -q   # 32 tests
 .venv/bin/ruff check src tests  # lint
 ```
 

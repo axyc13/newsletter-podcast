@@ -16,12 +16,16 @@ Requires-Dist: ruff>=0.6; extra == "dev"
 
 # Weekly Newsletter Podcast
 
-Every Sunday: pull the week's newsletters from Gmail → clean and merge them into
-one document → generate a conversational podcast with NotebookLM → email you the MP3.
+Turn a week of newsletters into one podcast episode — hands-free.
+
+Every Sunday it collects everything filed under a Gmail label, strips the
+boilerplate, merges the issues into a single document, has NotebookLM record a
+conversational overview, and emails you the MP3. When anything fails, you get
+an email naming the failing step instead of a silent miss.
 
 ```
-Gmail label "newsletters"
-   │  fetch (gmail.readonly)
+Gmail label "Newsletter"
+   │  fetch (gmail.modify)
    ▼
 clean + merge (trafilatura + bs4 rules — no LLM, no token cost)
    │  output/newsletter-YYYY-MM-DD.md
@@ -29,36 +33,62 @@ clean + merge (trafilatura + bs4 rules — no LLM, no token cost)
 NotebookLM audio generation (unofficial notebooklm-py)
    │  output/episode-YYYY-MM-DD.mp3
    ▼
+source emails → Gmail Trash (30-day recoverable)
+   ▼
 Gmail send → your inbox (attached; Drive link if > 20 MB)
 ```
 
-State (processed message IDs + episode lifecycle) lives in `state.db` (SQLite).
-Every failure path emails you — silent failure is how projects like this die.
+State (processed message IDs + episode lifecycle) lives in `state.db`
+(SQLite), so re-runs are safe at any point.
+
+## Features
+
+- **Hands-free** — one scheduled entry; the pipeline is resumable and
+  idempotent, so a retry never redoes finished work.
+- **Free, deterministic cleaning** — regex/bs4 rules strip footers,
+  unsubscribe links and tracking pixels without spending a single LLM token.
+- **Real podcast audio** — NotebookLM narrates from one merged document
+  instead of 30 raw sources.
+- **Delivered to your inbox** — episodes attach directly under 20 MB; larger
+  ones upload as an owner-only Drive link.
+- **Self-cleaning label** — once a week's emails are safely ingested they move
+  to Gmail Trash (recoverable for 30 days; `TRASH_INGESTED=0` opts out).
+- **Loud failures** — every error path emails you the step name and the
+  likely fix; logs land in `logs/run.log`.
+
+## Requirements
+
+- Python 3.10+
+- A Gmail account and a free Google Cloud project (Gmail + Drive APIs)
+- A [NotebookLM](https://notebooklm.google.com/) account — audio uses the
+  unofficial [`notebooklm-py`](https://pypi.org/project/notebooklm-py/) client,
+  which needs a re-login every few weeks
 
 ## Project layout
 
 ```
 src/newsletter_podcast/
   config.py       env-driven settings, OAuth scopes
-  gmail_fetch.py  OAuth flow, label lookup, message fetching/parsing
+  gmail_fetch.py  OAuth flow, label lookup, fetching, trash-after-ingest
   clean.py        HTML → noise-stripped text; weekly merge
-  state.py        SQLite: processed IDs + episode status (pending→fetched→generated→sent)
+  state.py        SQLite: processed IDs (week-scoped) + episode lifecycle
   storage.py      Drive upload/prune for oversized episodes
   notify.py       episode email + failure alerts
   audio/          AudioGenerator protocol (notebooklm backend + dummy for tests)
   main.py         CLI: auth, notebooklm-login, fetch, generate, send, run, status
-tests/            22 unit tests (fixtures, cleaning rules, state machine, week keys)
+tests/            30 unit tests (cleaning rules, state machine, trash, week keys)
 com.andrew.newsletterpodcast.plist   launchd job (Sun 18:00 + Mon 09:00 retry)
 ```
 
-## One-time setup
+Full design rationale — including why NotebookLM over the alternatives — is in
+[SystemDesign.md](SystemDesign.md).
 
-### 1. Python environment
+## Quickstart
 
-Already created. To recreate on a new machine:
+### 1. Install
 
 ```bash
-/opt/homebrew/bin/python3.13 -m venv .venv
+python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 ```
 
@@ -72,9 +102,10 @@ Already created. To recreate on a new machine:
    Desktop app** → download the JSON and save it as `credentials.json` in this
    directory (it is git-ignored).
 
-The flow requests three scopes: `gmail.readonly` (fetch), `gmail.send`
-(episodes + failure alerts), and `drive.file` (only files this app creates —
-used solely for episodes over the 20 MB attachment threshold).
+The flow requests three scopes: `gmail.modify` (fetch newsletters and move
+processed ones to Trash), `gmail.send` (episodes + failure alerts), and
+`drive.file` (only files this app creates — used solely for episodes over the
+20 MB attachment threshold).
 
 ### 3. Authenticate
 
@@ -85,7 +116,7 @@ used solely for episodes over the 20 MB attachment threshold).
 
 ### 4. Gmail label
 
-Create a Gmail label named `newsletters` (or set `GMAIL_LABEL` to your own) and
+Create a Gmail label named `Newsletter` (or set `GMAIL_LABEL` to your own) and
 file your newsletters under it. The pipeline reads only that label.
 
 ### 5. Dry-run before trusting it
@@ -97,7 +128,7 @@ file your newsletters under it. The pipeline reads only that label.
 Prints the cleaned, merged document without saving or marking anything
 processed. Inspect it: footers/unsubscribes should be gone, stories intact.
 
-## Running
+## Usage
 
 ```bash
 .venv/bin/newsletter-podcast run      # fetch → generate → send (resumable)
@@ -110,11 +141,17 @@ processed. Inspect it: footers/unsubscribes should be gone, stories intact.
 `run` resumes wherever the week stopped: if generation failed yesterday, today
 it skips fetch (doc already saved) and retries generation only.
 
-## Scheduling (launchd)
+Once an episode's audio has been generated, that week's source emails are
+**moved to Gmail Trash** (recoverable for 30 days; Gmail purges them after
+that). Set `TRASH_INGESTED=0` to keep them instead. Trash failures only log a
+warning — your content is already in the episode by then, and any missed
+messages are retried at the send step.
 
-`logs/` must exist first; then install the job (it runs at **18:00 Sunday and
-retries 09:00 Monday, local time** — if the Mac is asleep, launchd runs the
-missed job on wake):
+## Weekly automation (macOS launchd)
+
+The bundled job runs at **18:00 Sunday and retries 09:00 Monday, local
+time**; launchd runs a missed window on wake, so a sleeping Mac doesn't skip
+the week. It is spawn-and-die — no resident process. Install it with:
 
 ```bash
 mkdir -p logs
@@ -123,16 +160,22 @@ launchctl load ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
 # unload: launchctl unload ~/Library/LaunchAgents/com.andrew.newsletterpodcast.plist
 ```
 
-Keep **System Settings → General → Date & Time → Time zone** set to your New
-Zealand timezone — launchd's `StartCalendarInterval` uses local time.
+Adjust the `Label`, paths and times inside the plist if you fork it, and keep
+your system timezone set to what you want "Sunday 18:00" to mean. On Linux,
+an equivalent crontab entry works the same way:
 
-## Re-auth playbook (expect this every few weeks)
+```cron
+0 18 * * 0  cd /path/to/podcast && .venv/bin/newsletter-podcast run >> logs/cron.log 2>&1
+0 9  * * 1  cd /path/to/podcast && .venv/bin/newsletter-podcast run >> logs/cron.log 2>&1
+```
 
-| Symptom | Cause | Fix |
-|---|---|---|
-| Failure email at `generate` mentioning login/storage/cookies | NotebookLM cookies expired | `.venv/bin/notebooklm login` then `.venv/bin/newsletter-podcast run` |
-| `Not authenticated yet` or `token is no longer usable` | Google refresh token revoked/aged | `rm token.json && .venv/bin/newsletter-podcast auth` |
-| `Gmail label 'newsletters' not found` | Label renamed | create/rename label or set `GMAIL_LABEL` |
+## Troubleshooting (expect re-auth every few weeks)
+
+| Symptom                                                      | Cause                             | Fix                                                                  |
+| ------------------------------------------------------------ | --------------------------------- | -------------------------------------------------------------------- |
+| Failure email at `generate` mentioning login/storage/cookies | NotebookLM cookies expired        | `.venv/bin/notebooklm login` then `.venv/bin/newsletter-podcast run` |
+| `Not authenticated yet` or `token is no longer usable`       | Google refresh token revoked/aged | `rm token.json && .venv/bin/newsletter-podcast auth`                 |
+| `Gmail label 'Newsletter' not found`                          | Label renamed                     | create/rename label or set `GMAIL_LABEL`                             |
 
 You also get a failure email automatically on any error (it includes the step
 name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
@@ -140,14 +183,15 @@ name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
 
 ## Configuration (environment variables / `.env`)
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `GMAIL_LABEL` | `newsletters` | label to read |
-| `FETCH_DAYS` | `7` | look-back window for messages |
-| `NOTIFY_EMAIL` | authenticated account | episode/failure recipient |
-| `AUDIO_BACKEND` | `notebooklm` | `dummy` = write placeholder file, no network |
-| `AUDIO_MAX_MINUTES` | `15` | length hint in NotebookLM instructions |
-| `RETENTION_EPISODES` | `10` | Drive files kept after pruning |
+| Variable             | Default               | Purpose                                      |
+| -------------------- | --------------------- | -------------------------------------------- |
+| `GMAIL_LABEL`        | `Newsletter`          | label to read                                |
+| `FETCH_DAYS`         | `7`                   | look-back window for messages                |
+| `NOTIFY_EMAIL`       | authenticated account | episode/failure recipient                    |
+| `AUDIO_BACKEND`      | `notebooklm`          | `dummy` = write placeholder file, no network |
+| `AUDIO_MAX_MINUTES`  | `15`                  | length hint in NotebookLM instructions       |
+| `RETENTION_EPISODES` | `10`                  | Drive files kept after pruning               |
+| `TRASH_INGESTED`     | `1`                   | `0` keeps ingested source emails              |
 
 ## Design notes
 
@@ -169,7 +213,7 @@ name and this fix). Logs: `logs/run.log` (every run), `logs/launchd.*.log`
 ## Development
 
 ```bash
-.venv/bin/python -m pytest -q   # 22 tests
+.venv/bin/python -m pytest -q   # 30 tests
 .venv/bin/ruff check src tests  # lint
 ```
 
